@@ -1,5 +1,6 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -73,12 +74,15 @@ void setup() {
 
   /* ESP-NOW */
   WiFi.mode(WIFI_STA);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
   esp_now_init();
   esp_now_register_send_cb(OnDataSent);
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, receiverMac, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = 11;
   peerInfo.encrypt = false;
   esp_now_add_peer(&peerInfo);
   Serial.println("END SETUP");
