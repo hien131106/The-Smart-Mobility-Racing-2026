@@ -9,6 +9,10 @@
 #define LPWM_PIN   26   // BTS7960 lùi
 #define SERVO_PIN  27   // Servo lái
 
+#define LEFT_BLINKER    16
+#define RIGHT_BLINKER   17
+#define BLINK_INTERVAL 100
+
 // Giá trị joystick thực đo được
 #define THROTTLE_MIN        930
 #define THROTTLE_MAX        3370
@@ -42,6 +46,10 @@ ControlData rxData;
 unsigned long lastRxTime = 0;
 bool linkEstablished = false;
 
+// Xi nhan
+unsigned long prevMillis = 0;
+bool blinkState = false;
+
 // LED
 unsigned long ledTimer = 0;
 bool ledState = false;
@@ -68,6 +76,12 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(RPWM_PIN, OUTPUT);
   pinMode(LPWM_PIN, OUTPUT);
+
+  pinMode(LEFT_BLINKER, OUTPUT);
+  pinMode(RIGHT_BLINKER, OUTPUT);
+
+  digitalWrite(LEFT_BLINKER, 0);
+  digitalWrite(RIGHT_BLINKER, 0);
 
   analogWrite(RPWM_PIN, 0);      // Dừng động cơ lúc khởi động
   analogWrite(LPWM_PIN, 0);
@@ -128,12 +142,12 @@ void loop() {
       analogWrite(LPWM_PIN, 0);
     } 
     else if (forward) {
-      analogWrite(RPWM_PIN, currentPWM);
-      analogWrite(LPWM_PIN, 0);
-    } 
-    else {
       analogWrite(RPWM_PIN, 0);
       analogWrite(LPWM_PIN, currentPWM);
+    } 
+    else {
+      analogWrite(RPWM_PIN, currentPWM);
+      analogWrite(LPWM_PIN, 0);
     }
 
     /* ===== SERVO LÁI ===== */
@@ -150,6 +164,35 @@ void loop() {
     }
 
     steeringServo.write(servoAngle);
+
+    /* ===== BLINKER ===== */
+    unsigned long currentMillis = millis();
+
+    if (servoAngle < 65 || servoAngle > 115)
+    {
+      if (currentMillis - prevMillis >= BLINK_INTERVAL)
+      {
+        prevMillis = currentMillis;
+        blinkState = !blinkState;
+      }
+
+      if (servoAngle < 65)
+      {
+        digitalWrite(RIGHT_BLINKER, blinkState);
+        digitalWrite(LEFT_BLINKER, LOW);
+      }
+      else
+      {
+        digitalWrite(RIGHT_BLINKER, LOW);
+        digitalWrite(LEFT_BLINKER, blinkState);
+      }
+    }
+    
+    else{
+      digitalWrite(LEFT_BLINKER, LOW);
+      digitalWrite(RIGHT_BLINKER, LOW);
+      blinkState = false;
+    }
 
     /* ===== LED ===== */
     if (millis() - ledTimer >= 200) {
