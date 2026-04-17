@@ -26,6 +26,7 @@ uint8_t receiverMac[] = {0x88, 0x57, 0x21, 0x24, 0xA0, 0x40};
 typedef struct {
   uint16_t throttle;
   uint16_t steer;
+  uint8_t  mode;    // 1 = MANUAL (HIGH), 0 = AUTO (LOW)
 } ControlData;
 
 ControlData txData;
@@ -97,7 +98,8 @@ void loop() {
   esp_now_send(receiverMac, (uint8_t *)&txData, sizeof(txData));
 
   /* ===== MODE SWITCH ===== */
-  bool autoMode = !digitalRead(MODE_PIN); // GND = AUTO
+  bool autoMode = !digitalRead(MODE_PIN); // LOW (GND) = AUTO, HIGH = MANUAL
+  txData.mode = autoMode ? 0 : 1;        // 0 = AUTO, 1 = MANUAL
 
   if (autoMode) {
     digitalWrite(LED_AUTO, HIGH);
