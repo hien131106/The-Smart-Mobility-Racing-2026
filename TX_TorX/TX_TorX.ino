@@ -46,18 +46,21 @@ bool ledState = false;
 unsigned long oledTimer = 0;
 
 /* ===== CALLBACK ===== */
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) 
+{
   sendOK = (status == ESP_NOW_SEND_SUCCESS);
 }
 
-uint16_t movingAverage(uint16_t *buffer, uint32_t &sum, uint16_t newVal) {
+uint16_t movingAverage(uint16_t *buffer, uint32_t &sum, uint16_t newVal) 
+{
   sum -= buffer[filterIndex];
   buffer[filterIndex] = newVal;
   sum += newVal;
   return sum / FILTER_SIZE;
 }
 
-void setup() {
+void setup() 
+{
   Serial.begin(115200);
 
   pinMode(LED_STATUS, OUTPUT);
@@ -88,7 +91,8 @@ void setup() {
   Serial.println("END SETUP");
 }
 
-void loop() {
+void loop() 
+{
   /* ===== READ ADC ===== */
   uint16_t rawThrottle = analogRead(THROTTLE_PIN);
   uint16_t rawSteer    = analogRead(STEER_PIN);
@@ -105,7 +109,8 @@ void loop() {
   bool autoMode = !digitalRead(MODE_PIN); // LOW (GND) = AUTO, HIGH = MANUAL
   txData.mode = autoMode ? 0 : 1;        // 0 = AUTO, 1 = MANUAL
 
-  if (autoMode) {
+  if (autoMode) 
+  {
     digitalWrite(LED_AUTO, HIGH);
     digitalWrite(LED_MANUAL, LOW);
   } else {
@@ -114,7 +119,8 @@ void loop() {
   }
 
   /* ===== OLED UPDATE (10 Hz) ===== */
-  if (millis() - oledTimer >= 100) {
+  if (millis() - oledTimer >= 100) 
+  {
     oledTimer = millis();
 
     display.clearDisplay();
@@ -137,7 +143,8 @@ void loop() {
   }
 
   /* ===== STATUS LED BLINK ===== */
-  if (sendOK && millis() - ledTimer >= 200) {
+  if (sendOK && millis() - ledTimer >= 200) 
+  {
     ledTimer = millis();
     ledState = !ledState;
     digitalWrite(LED_STATUS, ledState);

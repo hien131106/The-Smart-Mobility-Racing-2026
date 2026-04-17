@@ -18,6 +18,25 @@ const int trigPins[NUM_SENSORS] = {23, 22, 21};  // FL, FM, FR
 const int echoPins[NUM_SENSORS] = {33, 32, 35};  // FL, FM, FR
 int distances[NUM_SENSORS];
 
+// ===== NGƯỠNG KHOẢNG CÁCH AUTO (cm) =====
+#define CLOSE_DIST    30    // Coi là "gần" → kích hoạt tránh vật cản
+
+// ===== TỐC ĐỘ AUTO =====
+#define AUTO_SPD       20   // Tiến
+#define AUTO_SPD_SLOW  20   // Tiến chậm khi tránh
+#define AUTO_SPD_BACK  20   // Lùi
+
+// ===== GÓC SERVO AUTO =====
+#define STEER_L  70         // Quẹo trái  (90 - 10)
+#define STEER_C  90         // Thẳng
+#define STEER_R  120        // Quẹo phải  (90 + 10)
+
+// ===== STATE MACHINE LÙI =====
+enum AutoState { NAVIGATE, BACKING };
+AutoState autoState    = NAVIGATE;
+unsigned long backStart = 0;
+#define BACK_DURATION  1500  // Thời gian lùi (ms)
+
 // ===== CẤU TRÚC GÓI ESP-NOW =====
 typedef struct {
   uint16_t throttle;
@@ -56,7 +75,8 @@ Servo steeringServo;
 
 // ===== ĐỌC CẢM BIẾN =====
 void readUltrasonics() {
-  for (int i = 0; i < NUM_SENSORS; i++) {
+  for (int i = 0; i < NUM_SENSORS; i++) 
+  {
     digitalWrite(trigPins[i], LOW);
     delayMicroseconds(2);
     digitalWrite(trigPins[i], HIGH);
@@ -69,14 +89,102 @@ void readUltrasonics() {
 }
 
 // ===== MOTOR =====
-void stopMotor() {
+void stopMotor() 
+{
   analogWrite(RPWM_PIN, 0);
   analogWrite(LPWM_PIN, 0);
   currentPWM = 0; targetPWM = 0;
 }
 
+// ===== AUTO NAVIGATE =====
+void autoNavigate() 
+{
+  int fl = distances[0];
+  int fm = distances[1];
+  int fr = distances[2];
+
+  bool closeFL = (fl < CLOSE_DIST);
+  bool closeFM = (fm < CLOSE_DIST);
+  bool closeFR = (fr < CLOSE_DIST);
+
+  // --- Đang trong trạng thái lùi ---
+  if (autoState == BACKING) 
+  {
+    if (millis() - backStart < BACK_DURATION) 
+    {
+      // Giữ nguyên lùi đến hết thời gian
+      return;
+    }
+    // Hết thời gian lùi → về NAVIGATE
+    stopMotor();
+    autoState = NAVIGATE;
+  }
+
+  // --- Quyết định hướng đi ---
+
+  // 3 con đều gần → lùi thẳng
+  if (closeFL && closeFM && closeFR) 
+  {
+    steeringServo.write(STEER_C);
+    analogWrite(RPWM_PIN, AUTO_SPD_BACK);
+    analogWrite(LPWM_PIN, 0);
+    digitalWrite(LEFT_BLINKER,  LOW);
+    digitalWrite(RIGHT_BLINKER, LOW);
+    autoState  = BACKING;
+    backStart  = millis();
+  }
+  // Trái + giữa gần → quẹo phải
+  else if (closeFL && closeFM) 
+  {
+    steeringServo.write(STEER_C);
+    analogWrite(RPWM_PIN, AUTO_SPD_BACK);
+    analogWrite(LPWM_PIN, 0);
+    digitalWrite(LEFT_BLINKER,  LOW);
+    digitalWrite(RIGHT_BLINKER, LOW);
+    autoState  = BACKING;
+  }
+  // Giữa + phải gần → quẹo trái
+  else if (closeFM && closeFR) 
+  {
+    steeringServo.write(STEER_C);
+    analogWrite(RPWM_PIN, AUTO_SPD_BACK);
+    analogWrite(LPWM_PIN, 0);
+    digitalWrite(LEFT_BLINKER,  LOW);
+    digitalWrite(RIGHT_BLINKER, LOW);
+    autoState  = BACKING;
+  }
+  // Chỉ trái gần → quẹo phải
+  else if (closeFL) 
+  {
+    steeringServo.write(STEER_R);
+    analogWrite(RPWM_PIN, 0);
+    analogWrite(LPWM_PIN, AUTO_SPD_SLOW);
+    digitalWrite(RIGHT_BLINKER, HIGH);
+    digitalWrite(LEFT_BLINKER,  LOW);
+  }
+  // Chỉ phải gần → quẹo trái
+  else if (closeFR) 
+  {
+    steeringServo.write(STEER_L);
+    analogWrite(RPWM_PIN, 0);
+    analogWrite(LPWM_PIN, AUTO_SPD_SLOW);
+    digitalWrite(LEFT_BLINKER,  HIGH);
+    digitalWrite(RIGHT_BLINKER, LOW);
+  }
+  // Đường thông → tiến thẳng
+  else 
+  {
+    steeringServo.write(STEER_C);
+    analogWrite(RPWM_PIN, 0);
+    analogWrite(LPWM_PIN, AUTO_SPD);
+    digitalWrite(LEFT_BLINKER,  LOW);
+    digitalWrite(RIGHT_BLINKER, LOW);
+  }
+}
+
 // ===== CALLBACK =====
-void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) 
+{
   if (len == sizeof(ControlData)) {
     memcpy(&rxData, incomingData, sizeof(rxData));
     lastRecv = millis();
@@ -85,7 +193,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 }
 
 // ===== SETUP =====
-void setup() {
+void setup() 
+{
   Serial.begin(115200);
 
   pinMode(LED_PIN,       OUTPUT);
@@ -96,7 +205,8 @@ void setup() {
   analogWrite(RPWM_PIN, 0);
   analogWrite(LPWM_PIN, 0);
 
-  for (int i = 0; i < NUM_SENSORS; i++) {
+  for (int i = 0; i < NUM_SENSORS; i++) 
+  {
     pinMode(trigPins[i], OUTPUT);
     pinMode(echoPins[i], INPUT);
     digitalWrite(trigPins[i], LOW);
@@ -116,21 +226,25 @@ void setup() {
 }
 
 // ===== LOOP =====
-void loop() {
+void loop() 
+{
   bool linkOK = linkEstablished && (millis() - lastRecv < LINK_TIMEOUT);
 
   /* ===== FAILSAFE ===== */
-  if (!linkOK) {
+  if (!linkOK) 
+  {
     stopMotor();
     steeringServo.write(90);
     digitalWrite(LEFT_BLINKER,  LOW);
     digitalWrite(RIGHT_BLINKER, LOW);
     digitalWrite(LED_PIN, LOW);
+    autoState = NAVIGATE;
     return;
   }
 
   /* ===== AUTO MODE ===== */
-  if (rxData.mode == 0) {
+  if (rxData.mode == 0) 
+  {
     readUltrasonics();
 
     Serial.print("FL:"); Serial.print(distances[0]);
@@ -138,6 +252,7 @@ void loop() {
     Serial.print("cm  FR:"); Serial.print(distances[2]);
     Serial.println("cm");
 
+    autoNavigate();
     digitalWrite(LED_PIN, HIGH);
     return;
   }
@@ -146,7 +261,8 @@ void loop() {
 
   // Throttle expo + ramp
   int16_t err = (int32_t)rxData.throttle - THROTTLE_CENTER;
-  if (abs(err) < DEADZONE) {
+  if (abs(err) < DEADZONE) 
+  {
     targetPWM = 0;
   } else {
     forward    = (err > 0);
@@ -159,7 +275,8 @@ void loop() {
   else if (currentPWM > targetPWM) currentPWM -= RAMP_DOWN;
   currentPWM = constrain(currentPWM, 0, forward ? PWM_MAX_FWD : PWM_MAX_REV);
 
-  if (currentPWM == 0) {
+  if (currentPWM == 0) 
+  {
     analogWrite(RPWM_PIN, 0); analogWrite(LPWM_PIN, 0);
   } else if (forward) {
     analogWrite(RPWM_PIN, 0); analogWrite(LPWM_PIN, currentPWM);
@@ -169,29 +286,44 @@ void loop() {
 
   // Servo lái
   int servoAngle;
-  if (abs((int32_t)rxData.steer - STEER_CENTER_ADC) < DEADZONE) {
+  if (abs((int32_t)rxData.steer - STEER_CENTER_ADC) < DEADZONE) 
+  {
     servoAngle = 90;
   } else {
-    servoAngle = constrain(map(rxData.steer, STEER_MIN_ADC, STEER_MAX_ADC, 55, 125), 55, 125);
+    servoAngle = constrain(map(rxData.steer, STEER_MIN_ADC, STEER_MAX_ADC, 125, 65), 65, 125);
   }
   steeringServo.write(servoAngle);
 
   // Xi nhan
   unsigned long now = millis();
-  if (servoAngle < 65 || servoAngle > 115) {
-    if (now - prevBlink >= BLINK_INTERVAL) { prevBlink = now; blinkStateManual = !blinkStateManual; }
-    if (servoAngle < 65) {
-      digitalWrite(LEFT_BLINKER, blinkStateManual); digitalWrite(RIGHT_BLINKER, LOW);
+  if (servoAngle < 75 || servoAngle > 115) 
+  {
+    if (now - prevBlink >= BLINK_INTERVAL) 
+    {
+      prevBlink = now; 
+      blinkStateManual = !blinkStateManual; 
+    }
+    if (servoAngle < 75) 
+    {
+      digitalWrite(LEFT_BLINKER, blinkStateManual); 
+      digitalWrite(RIGHT_BLINKER, LOW);
     } else {
-      digitalWrite(RIGHT_BLINKER, blinkStateManual); digitalWrite(LEFT_BLINKER, LOW);
+      digitalWrite(RIGHT_BLINKER, blinkStateManual); 
+      digitalWrite(LEFT_BLINKER, LOW);
     }
   } else {
-    digitalWrite(LEFT_BLINKER, LOW); digitalWrite(RIGHT_BLINKER, LOW);
+    digitalWrite(LEFT_BLINKER, LOW); 
+    digitalWrite(RIGHT_BLINKER, LOW);
     blinkStateManual = false;
   }
 
   // LED nhấp nháy
-  if (now - ledTimer >= 200) { ledTimer = now; ledState = !ledState; digitalWrite(LED_PIN, ledState); }
+  if (now - ledTimer >= 200) 
+  {
+    ledTimer = now; 
+    ledState = !ledState; 
+    digitalWrite(LED_PIN, ledState); 
+  }
 
   Serial.print("MANUAL | T:"); Serial.print(rxData.throttle);
   Serial.print(" PWM:"); Serial.print(currentPWM);
