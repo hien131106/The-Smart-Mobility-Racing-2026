@@ -229,19 +229,25 @@ void autoNavigate()
     driveForward(autoSpd);
     blinkLeft();
   }
-  // Cạnh trái gần hơn phải → nghiêng phải
-  else if (l <= FIRST_WARNING && l < r)
+  // Cạnh trái quá gần → lùi nghiêng phải tránh tường
+  else if (l <= FIRST_WARNING)
   {
     autoSteer(STEER_R_MEDIUM);
-    driveForward(autoSpd);
+    driveBackward(autoSpd);
     blinkRight();
+    autoState = BACKING;
+    backStart = millis();
+    backDur = 800;
   }
-  // Cạnh phải gần hơn trái → nghiêng trái
-  else if (r <= FIRST_WARNING && r < l)
+  // Cạnh phải quá gần → lùi nghiêng trái tránh tường
+  else if (r <= FIRST_WARNING)
   {
     autoSteer(STEER_L_MEDIUM);
-    driveForward(autoSpd);
+    driveBackward(autoSpd);
     blinkLeft();
+    autoState = BACKING;
+    backStart = millis();
+    backDur = 800;
   }
   // Đường thông → tiến thẳng
   else
