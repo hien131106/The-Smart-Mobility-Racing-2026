@@ -12,30 +12,39 @@
 #define LEFT_BLINKER    16
 #define RIGHT_BLINKER   17
 
-// ===== CẢM BIẾN SIÊU ÂM (3 CON) =====
-#define NUM_SENSORS 3
-const int trigPins[NUM_SENSORS] = {23, 22, 21};  // FL, FM, FR
-const int echoPins[NUM_SENSORS] = {33, 32, 35};  // FL, FM, FR
+// ===== CẢM BIẾN SIÊU ÂM (5 CON - trái sang phải) =====
+// S1=trái ngoài, S2=trái trong, S3=giữa, S4=phải trong, S5=phải ngoài
+#define NUM_SENSORS 5
+const int trigPins[NUM_SENSORS] = {23, 22, 21, 19, 18};
+const int echoPins[NUM_SENSORS] = {33, 32, 35, 34, 39};
 int distances[NUM_SENSORS];
 
 // ===== NGƯỠNG KHOẢNG CÁCH AUTO (cm) =====
-#define CLOSE_DIST    30    // Coi là "gần" → kích hoạt tránh vật cản
+#define FIRST_WARNING   25
+#define SECOND_WARNING  25
+#define THIRD_WARNING   35
 
 // ===== TỐC ĐỘ AUTO =====
-#define AUTO_SPD       20   // Tiến
-#define AUTO_SPD_SLOW  20   // Tiến chậm khi tránh
-#define AUTO_SPD_BACK  20   // Lùi
+#define AUTO_SPD       15   // Tiến thẳng
+#define AUTO_SPD_SLOW  15   // Tiến khi tránh
+#define AUTO_SPD_BACK  15   // Lùi
 
-// ===== GÓC SERVO AUTO =====
-#define STEER_L  70         // Quẹo trái  (90 - 10)
-#define STEER_C  90         // Thẳng
-#define STEER_R  120        // Quẹo phải  (90 + 10)
+// ===== GÓC SERVO AUTO (constrain 65-125) =====
+#define STEER_C         90
+#define STEER_L_MEDIUM  65   // 90 - 40 → capped
+#define STEER_L_HARD    65   // 90 - 50 → capped
+#define STEER_R_MEDIUM 125   // 90 + 40 → capped
+#define STEER_R_HARD   125   // 90 + 50 → capped
 
 // ===== STATE MACHINE LÙI =====
 enum AutoState { NAVIGATE, BACKING };
-AutoState autoState    = NAVIGATE;
-unsigned long backStart = 0;
-#define BACK_DURATION  1500  // Thời gian lùi (ms)
+AutoState autoState      = NAVIGATE;
+unsigned long backStart  = 0;
+unsigned long backDur    = 0;   // thời gian lùi, set riêng mỗi maneuver
+
+// ===== BLINK AUTO =====
+unsigned long lastBlinkAuto = 0;
+bool ledStateAuto           = false;
 
 // ===== CẤU TRÚC GÓI ESP-NOW =====
 typedef struct {
@@ -88,97 +97,137 @@ void readUltrasonics() {
   }
 }
 
-// ===== MOTOR =====
-void stopMotor() 
+// ===== MOTOR / SERVO HELPERS =====
+void stopMotor()
 {
   analogWrite(RPWM_PIN, 0);
   analogWrite(LPWM_PIN, 0);
   currentPWM = 0; targetPWM = 0;
 }
+void driveForward(uint8_t spd)  { analogWrite(RPWM_PIN, 0);   analogWrite(LPWM_PIN, spd); }
+void driveBackward(uint8_t spd) { analogWrite(RPWM_PIN, spd); analogWrite(LPWM_PIN, 0);   }
+
+// ===== BLINK HELPERS (AUTO) =====
+void blinkLeft() {
+  unsigned long now = millis();
+  if (now - lastBlinkAuto >= 250) { lastBlinkAuto = now; ledStateAuto = !ledStateAuto; }
+  digitalWrite(LEFT_BLINKER,  ledStateAuto ? HIGH : LOW);
+  digitalWrite(RIGHT_BLINKER, LOW);
+}
+void blinkRight() {
+  unsigned long now = millis();
+  if (now - lastBlinkAuto >= 250) { lastBlinkAuto = now; ledStateAuto = !ledStateAuto; }
+  digitalWrite(RIGHT_BLINKER, ledStateAuto ? HIGH : LOW);
+  digitalWrite(LEFT_BLINKER,  LOW);
+}
+void notBlink() {
+  digitalWrite(LEFT_BLINKER,  LOW);
+  digitalWrite(RIGHT_BLINKER, LOW);
+}
 
 // ===== AUTO NAVIGATE =====
-void autoNavigate() 
+// Sensor mapping (S1..S5 trái→phải):
+//   fl = S2 = distances[1]   (front-left)
+//   fm = S3 = distances[2]   (front-middle)
+//   fr = S4 = distances[3]   (front-right)
+//   l  = S1 = distances[0]   (side-left)
+//   r  = S5 = distances[4]   (side-right)
+void autoNavigate()
 {
-  int fl = distances[0];
-  int fm = distances[1];
-  int fr = distances[2];
+  int fl = distances[1];
+  int fm = distances[2];
+  int fr = distances[3];
+  int l  = distances[0];
+  int r  = distances[4];
 
-  bool closeFL = (fl < CLOSE_DIST);
-  bool closeFM = (fm < CLOSE_DIST);
-  bool closeFR = (fr < CLOSE_DIST);
-
-  // --- Đang trong trạng thái lùi ---
-  if (autoState == BACKING) 
+  // --- Đang trong trạng thái lùi: giữ đến hết thời gian ---
+  if (autoState == BACKING)
   {
-    if (millis() - backStart < BACK_DURATION) 
-    {
-      // Giữ nguyên lùi đến hết thời gian
-      return;
-    }
-    // Hết thời gian lùi → về NAVIGATE
+    if (millis() - backStart < backDur) return;
     stopMotor();
     autoState = NAVIGATE;
   }
 
-  // --- Quyết định hướng đi ---
+  // --- Quyết định hướng đi (thuật toán gốc) ---
 
-  // 3 con đều gần → lùi thẳng
-  if (closeFL && closeFM && closeFR) 
+  // Giữa quá gần → lùi thẳng (750ms)
+  if (fm <= FIRST_WARNING)
   {
     steeringServo.write(STEER_C);
-    analogWrite(RPWM_PIN, AUTO_SPD_BACK);
-    analogWrite(LPWM_PIN, 0);
-    digitalWrite(LEFT_BLINKER,  LOW);
-    digitalWrite(RIGHT_BLINKER, LOW);
-    autoState  = BACKING;
-    backStart  = millis();
+    driveBackward(AUTO_SPD_BACK);
+    notBlink();
+    autoState = BACKING; 
+    backStart = millis(); 
+    backDur = 1000;
   }
-  // Trái + giữa gần → quẹo phải
-  else if (closeFL && closeFM) 
+  // Góc trái rất gần → lùi nghiêng trái (750ms)
+  else if (fl <= FIRST_WARNING)
   {
-    steeringServo.write(STEER_C);
-    analogWrite(RPWM_PIN, AUTO_SPD_BACK);
-    analogWrite(LPWM_PIN, 0);
-    digitalWrite(LEFT_BLINKER,  LOW);
-    digitalWrite(RIGHT_BLINKER, LOW);
-    autoState  = BACKING;
+    steeringServo.write(STEER_L_MEDIUM);
+    driveBackward(AUTO_SPD_BACK);
+    blinkLeft();
+    autoState = BACKING; 
+    backStart = millis(); 
+    backDur = 1000;
   }
-  // Giữa + phải gần → quẹo trái
-  else if (closeFM && closeFR) 
+  // Góc phải rất gần → lùi nghiêng phải (500ms)
+  else if (fr <= FIRST_WARNING)
   {
-    steeringServo.write(STEER_C);
-    analogWrite(RPWM_PIN, AUTO_SPD_BACK);
-    analogWrite(LPWM_PIN, 0);
-    digitalWrite(LEFT_BLINKER,  LOW);
-    digitalWrite(RIGHT_BLINKER, LOW);
-    autoState  = BACKING;
+    steeringServo.write(STEER_R_MEDIUM);
+    driveBackward(AUTO_SPD_BACK);
+    blinkRight();
+    autoState = BACKING; 
+    backStart = millis(); 
+    backDur = 1000;
   }
-  // Chỉ trái gần → quẹo phải
-  else if (closeFL) 
+  // Trái + giữa gần → quẹo phải mạnh
+  else if (fl <= SECOND_WARNING && fm <= SECOND_WARNING)
   {
-    steeringServo.write(STEER_R);
-    analogWrite(RPWM_PIN, 0);
-    analogWrite(LPWM_PIN, AUTO_SPD_SLOW);
-    digitalWrite(RIGHT_BLINKER, HIGH);
-    digitalWrite(LEFT_BLINKER,  LOW);
+    steeringServo.write(STEER_R_HARD);
+    driveForward(AUTO_SPD_SLOW);
+    blinkRight();
   }
-  // Chỉ phải gần → quẹo trái
-  else if (closeFR) 
+  // Phải + giữa gần → quẹo trái mạnh
+  else if (fr <= SECOND_WARNING && fm <= SECOND_WARNING)
   {
-    steeringServo.write(STEER_L);
-    analogWrite(RPWM_PIN, 0);
-    analogWrite(LPWM_PIN, AUTO_SPD_SLOW);
-    digitalWrite(LEFT_BLINKER,  HIGH);
-    digitalWrite(RIGHT_BLINKER, LOW);
+    steeringServo.write(STEER_L_HARD);
+    driveForward(AUTO_SPD_SLOW);
+    blinkLeft();
+  }
+  // Trái cảnh báo → nghiêng phải vừa
+  else if (fl > FIRST_WARNING && fl < THIRD_WARNING)
+  {
+    steeringServo.write(STEER_R_MEDIUM);
+    driveForward(AUTO_SPD_SLOW);
+    blinkRight();
+  }
+  // Phải cảnh báo → nghiêng trái vừa
+  else if (fr > FIRST_WARNING && fr < THIRD_WARNING)
+  {
+    steeringServo.write(STEER_L_MEDIUM);
+    driveForward(AUTO_SPD_SLOW);
+    blinkLeft();
+  }
+  // Cạnh trái gần hơn phải → nghiêng phải
+  else if (l <= FIRST_WARNING && l < r)
+  {
+    steeringServo.write(STEER_R_MEDIUM);
+    driveForward(AUTO_SPD_SLOW);
+    blinkRight();
+  }
+  // Cạnh phải gần hơn trái → nghiêng trái
+  else if (r <= FIRST_WARNING && r < l)
+  {
+    steeringServo.write(STEER_L_MEDIUM);
+    driveForward(AUTO_SPD_SLOW);
+    blinkLeft();
   }
   // Đường thông → tiến thẳng
-  else 
+  else
   {
     steeringServo.write(STEER_C);
-    analogWrite(RPWM_PIN, 0);
-    analogWrite(LPWM_PIN, AUTO_SPD);
-    digitalWrite(LEFT_BLINKER,  LOW);
-    digitalWrite(RIGHT_BLINKER, LOW);
+    driveForward(AUTO_SPD);
+    notBlink();
   }
 }
 
@@ -247,9 +296,11 @@ void loop()
   {
     readUltrasonics();
 
-    Serial.print("FL:"); Serial.print(distances[0]);
-    Serial.print("cm  FM:"); Serial.print(distances[1]);
-    Serial.print("cm  FR:"); Serial.print(distances[2]);
+    Serial.print("S1:"); Serial.print(distances[0]);
+    Serial.print("cm  S2:"); Serial.print(distances[1]);
+    Serial.print("cm  S3:"); Serial.print(distances[2]);
+    Serial.print("cm  S4:"); Serial.print(distances[3]);
+    Serial.print("cm  S5:"); Serial.print(distances[4]);
     Serial.println("cm");
 
     autoNavigate();
