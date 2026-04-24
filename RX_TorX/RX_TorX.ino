@@ -24,10 +24,8 @@ int distances[NUM_SENSORS];
 #define SECOND_WARNING  25
 #define THIRD_WARNING   35
 
-// ===== TỐC ĐỘ AUTO =====
-#define AUTO_SPD       15   // Tiến thẳng
-#define AUTO_SPD_SLOW  15   // Tiến khi tránh
-#define AUTO_SPD_BACK  15   // Lùi
+// ===== TỐC ĐỘ AUTO (được điều chỉnh qua trim chân 35, range 15-20) =====
+uint8_t autoSpd = 15;
 
 // ===== GÓC SERVO AUTO (constrain 65-125) =====
 #define STEER_C         90
@@ -39,6 +37,8 @@ int distances[NUM_SENSORS];
 // ===== STATE MACHINE LÙI =====
 enum AutoState { NAVIGATE, BACKING };
 AutoState autoState      = NAVIGATE;
+uint8_t   autoDriveDir   = 0; // 0=STOP, 1=FORWARD, 2=BACKWARD
+uint8_t   autoSteerDir   = 0; // 0=CENTER, 1=LEFT, 2=RIGHT
 unsigned long backStart  = 0;
 unsigned long backDur    = 0;   // thời gian lùi, set riêng mỗi maneuver
 
@@ -50,12 +50,26 @@ bool ledStateAuto           = false;
 typedef struct {
   uint16_t throttle;
   uint16_t steer;
-  uint8_t  mode;    // 1 = MANUAL, 0 = AUTO
+  uint8_t  mode;       // 1 = MANUAL, 0 = AUTO
+  uint16_t trimGas;     // 0-4095 → giới hạn tốc độ tối đa (manual)
+  uint16_t trimSteer;   // 0-4095 → góc lái giữ khi thả joystick
+  uint16_t trimAutoGas; // 0-4095 → tốc độ tự hành (10-20)
 } ControlData;
+
+typedef struct {
+  uint16_t dist[5];    // S1..S5 (cm), 999 = không phát hiện
+  uint8_t  driveState; // 0=STOP, 1=FORWARD, 2=BACKWARD
+  uint8_t  steerState; // 0=CENTER, 1=LEFT, 2=RIGHT
+} SensorData;
 
 ControlData rxData;
 unsigned long lastRecv = 0;
 bool linkEstablished   = false;
+
+// MAC của TX (tay cầm) — lưu từ gói đầu tiên nhận được
+uint8_t txMacAddr[6];
+bool    txMacSaved  = false; // MAC đã lưu, chờ add peer từ main loop
+bool    txPeerAdded = false; // peer đã add xong, có thể gửi
 
 // ===== THAM SỐ MANUAL =====
 #define THROTTLE_CENTER     1820
@@ -100,12 +114,19 @@ void readUltrasonics() {
 // ===== MOTOR / SERVO HELPERS =====
 void stopMotor()
 {
+  autoDriveDir = 0;
   analogWrite(RPWM_PIN, 0);
   analogWrite(LPWM_PIN, 0);
   currentPWM = 0; targetPWM = 0;
 }
-void driveForward(uint8_t spd)  { analogWrite(RPWM_PIN, 0);   analogWrite(LPWM_PIN, spd); }
-void driveBackward(uint8_t spd) { analogWrite(RPWM_PIN, spd); analogWrite(LPWM_PIN, 0);   }
+void driveForward(uint8_t spd)  { autoDriveDir = 1; analogWrite(RPWM_PIN, 0);   analogWrite(LPWM_PIN, spd); }
+void driveBackward(uint8_t spd) { autoDriveDir = 2; analogWrite(RPWM_PIN, spd); analogWrite(LPWM_PIN, 0);   }
+void autoSteer(int angle) {
+  if      (angle < 85) autoSteerDir = 1; // LEFT
+  else if (angle > 95) autoSteerDir = 2; // RIGHT
+  else                 autoSteerDir = 0; // CENTER
+  steeringServo.write(angle);
+}
 
 // ===== BLINK HELPERS (AUTO) =====
 void blinkLeft() {
@@ -150,94 +171,100 @@ void autoNavigate()
 
   // --- Quyết định hướng đi (thuật toán gốc) ---
 
-  // Giữa quá gần → lùi thẳng (750ms)
+  // Giữa quá gần → lùi thẳng
   if (fm <= FIRST_WARNING)
   {
-    steeringServo.write(STEER_C);
-    driveBackward(AUTO_SPD_BACK);
+    autoSteer(STEER_C);
+    driveBackward(autoSpd);
     notBlink();
-    autoState = BACKING; 
-    backStart = millis(); 
+    autoState = BACKING;
+    backStart = millis();
     backDur = 1000;
   }
-  // Góc trái rất gần → lùi nghiêng trái (750ms)
+  // Góc trái rất gần → lùi nghiêng trái
   else if (fl <= FIRST_WARNING)
   {
-    steeringServo.write(STEER_L_MEDIUM);
-    driveBackward(AUTO_SPD_BACK);
+    autoSteer(STEER_L_MEDIUM);
+    driveBackward(autoSpd);
     blinkLeft();
-    autoState = BACKING; 
-    backStart = millis(); 
+    autoState = BACKING;
+    backStart = millis();
     backDur = 1000;
   }
-  // Góc phải rất gần → lùi nghiêng phải (500ms)
+  // Góc phải rất gần → lùi nghiêng phải
   else if (fr <= FIRST_WARNING)
   {
-    steeringServo.write(STEER_R_MEDIUM);
-    driveBackward(AUTO_SPD_BACK);
+    autoSteer(STEER_R_MEDIUM);
+    driveBackward(autoSpd);
     blinkRight();
-    autoState = BACKING; 
-    backStart = millis(); 
+    autoState = BACKING;
+    backStart = millis();
     backDur = 1000;
   }
   // Trái + giữa gần → quẹo phải mạnh
   else if (fl <= SECOND_WARNING && fm <= SECOND_WARNING)
   {
-    steeringServo.write(STEER_R_HARD);
-    driveForward(AUTO_SPD_SLOW);
+    autoSteer(STEER_R_HARD);
+    driveForward(autoSpd);
     blinkRight();
   }
   // Phải + giữa gần → quẹo trái mạnh
   else if (fr <= SECOND_WARNING && fm <= SECOND_WARNING)
   {
-    steeringServo.write(STEER_L_HARD);
-    driveForward(AUTO_SPD_SLOW);
+    autoSteer(STEER_L_HARD);
+    driveForward(autoSpd);
     blinkLeft();
   }
   // Trái cảnh báo → nghiêng phải vừa
   else if (fl > FIRST_WARNING && fl < THIRD_WARNING)
   {
-    steeringServo.write(STEER_R_MEDIUM);
-    driveForward(AUTO_SPD_SLOW);
+    autoSteer(STEER_R_MEDIUM);
+    driveForward(autoSpd);
     blinkRight();
   }
   // Phải cảnh báo → nghiêng trái vừa
   else if (fr > FIRST_WARNING && fr < THIRD_WARNING)
   {
-    steeringServo.write(STEER_L_MEDIUM);
-    driveForward(AUTO_SPD_SLOW);
+    autoSteer(STEER_L_MEDIUM);
+    driveForward(autoSpd);
     blinkLeft();
   }
   // Cạnh trái gần hơn phải → nghiêng phải
   else if (l <= FIRST_WARNING && l < r)
   {
-    steeringServo.write(STEER_R_MEDIUM);
-    driveForward(AUTO_SPD_SLOW);
+    autoSteer(STEER_R_MEDIUM);
+    driveForward(autoSpd);
     blinkRight();
   }
   // Cạnh phải gần hơn trái → nghiêng trái
   else if (r <= FIRST_WARNING && r < l)
   {
-    steeringServo.write(STEER_L_MEDIUM);
-    driveForward(AUTO_SPD_SLOW);
+    autoSteer(STEER_L_MEDIUM);
+    driveForward(autoSpd);
     blinkLeft();
   }
   // Đường thông → tiến thẳng
   else
   {
-    steeringServo.write(STEER_C);
-    driveForward(AUTO_SPD);
+    autoSteer(STEER_C);
+    driveForward(autoSpd);
     notBlink();
   }
 }
 
 // ===== CALLBACK =====
-void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) 
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
   if (len == sizeof(ControlData)) {
     memcpy(&rxData, incomingData, sizeof(rxData));
     lastRecv = millis();
     linkEstablished = true;
+
+    // Lưu MAC của TX — KHÔNG gọi esp_now_add_peer từ trong callback
+    if (!txMacSaved && !txPeerAdded) {
+      memcpy(txMacAddr, mac, 6);
+      txMacSaved = true;
+    }
   }
 }
 
@@ -291,9 +318,19 @@ void loop()
     return;
   }
 
+  // Thêm TX làm peer ngoài callback (an toàn với WiFi task)
+  if (txMacSaved && !txPeerAdded) {
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, txMacAddr, 6);
+    peer.channel = 11;
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) == ESP_OK) txPeerAdded = true;
+  }
+
   /* ===== AUTO MODE ===== */
-  if (rxData.mode == 0) 
+  if (rxData.mode == 0)
   {
+    autoSpd = (uint8_t)map(rxData.trimAutoGas, 0, 4095, 10, 20);
     readUltrasonics();
 
     Serial.print("S1:"); Serial.print(distances[0]);
@@ -304,27 +341,40 @@ void loop()
     Serial.println("cm");
 
     autoNavigate();
+
+    // Gửi khoảng cách + trạng thái tiến/lùi ngược lên TX (tay cầm)
+    if (txPeerAdded) {
+      SensorData sData;
+      for (int i = 0; i < 5; i++) sData.dist[i] = (uint16_t)distances[i];
+      sData.driveState = autoDriveDir;
+      sData.steerState = autoSteerDir;
+      esp_now_send(txMacAddr, (uint8_t *)&sData, sizeof(sData));
+    }
+
     digitalWrite(LED_PIN, HIGH);
     return;
   }
 
   /* ===== MANUAL MODE ===== */
 
+  // Trim gas → giới hạn tốc độ tối đa (50-255)
+  int maxFwd = map(rxData.trimGas, 0, 4095, 50, 255);
+
   // Throttle expo + ramp
   int16_t err = (int32_t)rxData.throttle - THROTTLE_CENTER;
-  if (abs(err) < DEADZONE) 
+  if (abs(err) < DEADZONE)
   {
     targetPWM = 0;
   } else {
     forward    = (err > 0);
     int range  = forward ? THROTTLE_RANGE_FWD : THROTTLE_RANGE_REV;
-    int pwmMax = forward ? PWM_MAX_FWD : PWM_MAX_REV;
+    int pwmMax = forward ? maxFwd : PWM_MAX_REV;
     float norm = constrain((float)(abs(err) - DEADZONE) / (float)(range - DEADZONE), 0.0f, 1.0f);
     targetPWM  = (int)(pow(norm, EXPO_GAIN) * pwmMax);
   }
   if      (currentPWM < targetPWM) currentPWM += RAMP_UP;
   else if (currentPWM > targetPWM) currentPWM -= RAMP_DOWN;
-  currentPWM = constrain(currentPWM, 0, forward ? PWM_MAX_FWD : PWM_MAX_REV);
+  currentPWM = constrain(currentPWM, 0, forward ? maxFwd : PWM_MAX_REV);
 
   if (currentPWM == 0) 
   {
@@ -336,11 +386,16 @@ void loop()
   }
 
   // Servo lái
+  // Trim steer → góc giữ khi thả joystick (65-125)
+  int trimSteerAngle = map(rxData.trimSteer, 0, 4095, 65, 125);
+
   int servoAngle;
-  if (abs((int32_t)rxData.steer - STEER_CENTER_ADC) < DEADZONE) 
+  if (abs((int32_t)rxData.steer - STEER_CENTER_ADC) < DEADZONE)
   {
-    servoAngle = 90;
+    // Thả joystick → giữ góc theo biến trở
+    servoAngle = trimSteerAngle;
   } else {
+    // Đang lái → servo theo joystick
     servoAngle = constrain(map(rxData.steer, STEER_MIN_ADC, STEER_MAX_ADC, 125, 65), 65, 125);
   }
   steeringServo.write(servoAngle);
