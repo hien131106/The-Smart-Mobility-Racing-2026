@@ -20,9 +20,9 @@ const int echoPins[NUM_SENSORS] = {33, 32, 35, 34, 39};
 int distances[NUM_SENSORS];
 
 // ===== NGƯỠNG KHOẢNG CÁCH AUTO (cm) =====
-#define FIRST_WARNING   25
-#define SECOND_WARNING  25
-#define THIRD_WARNING   35
+#define FIRST_WARNING   18
+#define SECOND_WARNING  18
+#define THIRD_WARNING   20
 
 // ===== TỐC ĐỘ AUTO (được điều chỉnh qua trim chân 35, range 15-20) =====
 uint8_t autoSpd = 15;
