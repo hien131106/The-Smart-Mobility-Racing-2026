@@ -20,18 +20,22 @@ const int echoPins[NUM_SENSORS] = {33, 32, 35, 34, 39};
 int distances[NUM_SENSORS];
 
 // ===== NGƯỠNG KHOẢNG CÁCH AUTO (cm) =====
-#define FIRST_WARNING   18
-#define SECOND_WARNING  18
-#define THIRD_WARNING   20
+#define FIRST_WARNING   10
+#define SECOND_WARNING  30
+#define THIRD_WARNING   35
 
-// ===== TỐC ĐỘ AUTO (được điều chỉnh qua trim chân 35, range 15-20) =====
-uint8_t autoSpd = 15;
+// ===== TỐC ĐỘ AUTO (được điều chỉnh qua trim chân 35, range 10-30) =====
+uint8_t autoSpd = 13;
+// Map auto trim to real PWM range (adjust MIN_AUTO_PWM to the minimum PWM
+// that reliably moves the motor on your hardware)
+#define MIN_AUTO_PWM  60
+#define MAX_AUTO_PWM 120
 
 // ===== GÓC SERVO AUTO (constrain 65-125) =====
 #define STEER_C         90
 #define STEER_L_MEDIUM  65   // 90 - 40 → capped
-#define STEER_L_HARD    65   // 90 - 50 → capped
-#define STEER_R_MEDIUM 125   // 90 + 40 → capped
+#define STEER_L_HARD    75   // 90 - 50 → capped
+#define STEER_R_MEDIUM 115   // 90 + 40 → capped
 #define STEER_R_HARD   125   // 90 + 50 → capped
 
 // ===== STATE MACHINE LÙI =====
@@ -53,13 +57,14 @@ typedef struct {
   uint8_t  mode;       // 1 = MANUAL, 0 = AUTO
   uint16_t trimGas;     // 0-4095 → giới hạn tốc độ tối đa (manual)
   uint16_t trimSteer;   // 0-4095 → góc lái giữ khi thả joystick
-  uint16_t trimAutoGas; // 0-4095 → tốc độ tự hành (10-20)
+  uint16_t trimAutoGas; // logical autospeed (10-30) — TX sends mapped 10-30
 } ControlData;
 
 typedef struct {
   uint16_t dist[5];    // S1..S5 (cm), 999 = không phát hiện
   uint8_t  driveState; // 0=STOP, 1=FORWARD, 2=BACKWARD
   uint8_t  steerState; // 0=CENTER, 1=LEFT, 2=RIGHT
+  uint16_t energy100;  // battery voltage in hundredths of volts (e.g., 1265 -> 12.65V)
 } SensorData;
 
 ControlData rxData;
@@ -72,13 +77,13 @@ bool    txMacSaved  = false; // MAC đã lưu, chờ add peer từ main loop
 bool    txPeerAdded = false; // peer đã add xong, có thể gửi
 
 // ===== THAM SỐ MANUAL =====
-#define THROTTLE_CENTER     1820
+#define THROTTLE_CENTER     1850
 #define THROTTLE_RANGE_FWD  1550
 #define THROTTLE_RANGE_REV  890
 #define STEER_MIN_ADC       280
 #define STEER_MAX_ADC       3730
-#define STEER_CENTER_ADC    1986
-#define DEADZONE            50
+#define STEER_CENTER_ADC    1996
+#define DEADZONE            60
 #define LINK_TIMEOUT        500
 #define PWM_MAX_FWD         255
 #define PWM_MAX_REV         159
@@ -95,6 +100,59 @@ unsigned long ledTimer  = 0;
 bool ledState           = false;
 
 Servo steeringServo;
+
+// PWM (use LEDC instead of analogWrite for deterministic behaviour)
+#define PWM_FREQ_HZ      21000
+#define PWM_RESOLUTION   8
+#define RPWM_CHANNEL     4
+#define LPWM_CHANNEL     5
+
+/* If 1, invert throttle sign (useful if motor wiring is reversed) */
+#define THROTTLE_INVERT 0
+
+int8_t prevMode = -1; // track previous mode to reset state on mode switch
+
+// ===== BATTERY MONITOR =====
+#define BAT_PIN           36    // ADC pin used to measure divider output (VP)
+#define ADC_REF_VOLTAGE   3.30f
+#define R_DIV_TOP         51000.0f
+#define R_DIV_BOTTOM      10000.0f
+#define ENERGY_FILTER_SIZE 10
+// Calibration factor to correct ADC + divider inaccuracies.
+// Measured: OLED showed 11.23V but actual is 12.26V -> factor = 12.26/11.23 ~= 1.09189
+#define CALIB_FACTOR 1.09189f
+
+uint16_t energyBuf[ENERGY_FILTER_SIZE] = {0};
+uint32_t energySum = 0;
+uint8_t  energyIndex = 0;
+uint16_t energyAvgADC = 0; // averaged ADC reading
+uint16_t energy100 = 0;    // measured battery voltage * 100 (hundredths of volt)
+
+// periodic sensor send
+unsigned long lastSensorSend = 0;
+const unsigned long SENSOR_SEND_INTERVAL = 100; // ms
+
+// send sensor data helper
+void sendSensorDataIfDue(bool includeSensors) {
+  if (!txPeerAdded) return;
+  unsigned long now = millis();
+  if (now - lastSensorSend < SENSOR_SEND_INTERVAL) return;
+  lastSensorSend = now;
+
+  SensorData sData;
+  if (includeSensors) {
+    for (int i = 0; i < 5; i++) sData.dist[i] = (uint16_t)distances[i];
+    sData.driveState = autoDriveDir;
+    sData.steerState = autoSteerDir;
+  } else {
+    // indicate sensors not provided
+    for (int i = 0; i < 5; i++) sData.dist[i] = 999;
+    sData.driveState = 0;
+    sData.steerState = 0;
+  }
+  sData.energy100 = energy100;
+  esp_now_send(txMacAddr, (uint8_t *)&sData, sizeof(sData));
+}
 
 // ===== ĐỌC CẢM BIẾN =====
 void readUltrasonics() {
@@ -115,12 +173,24 @@ void readUltrasonics() {
 void stopMotor()
 {
   autoDriveDir = 0;
-  analogWrite(RPWM_PIN, 0);
-  analogWrite(LPWM_PIN, 0);
+  ledcWrite(RPWM_CHANNEL, 0);
+  ledcWrite(LPWM_CHANNEL, 0);
   currentPWM = 0; targetPWM = 0;
 }
-void driveForward(uint8_t spd)  { autoDriveDir = 1; analogWrite(RPWM_PIN, 0);   analogWrite(LPWM_PIN, spd); }
-void driveBackward(uint8_t spd) { autoDriveDir = 2; analogWrite(RPWM_PIN, spd); analogWrite(LPWM_PIN, 0);   }
+void driveForward(uint8_t spd)  {
+  autoDriveDir = 1;
+  ledcWrite(RPWM_CHANNEL, 0);
+  ledcWrite(LPWM_CHANNEL, spd);
+  currentPWM = spd;
+  forward = true;
+}
+void driveBackward(uint8_t spd) {
+  autoDriveDir = 2;
+  ledcWrite(LPWM_CHANNEL, 0);
+  ledcWrite(RPWM_CHANNEL, spd);
+  currentPWM = spd;
+  forward = false;
+}
 void autoSteer(int angle) {
   if      (angle < 85) autoSteerDir = 1; // LEFT
   else if (angle > 95) autoSteerDir = 2; // RIGHT
@@ -229,22 +299,22 @@ void autoNavigate()
     driveForward(autoSpd);
     blinkLeft();
   }
-  // Cạnh trái quá gần → lùi nghiêng phải tránh tường
+  // Cạnh trái quá gần → lùi nghiêng trái tránh tường
   else if (l <= FIRST_WARNING)
-  {
-    autoSteer(STEER_R_MEDIUM);
-    driveBackward(autoSpd);
-    blinkRight();
-    autoState = BACKING;
-    backStart = millis();
-    backDur = 800;
-  }
-  // Cạnh phải quá gần → lùi nghiêng trái tránh tường
-  else if (r <= FIRST_WARNING)
   {
     autoSteer(STEER_L_MEDIUM);
     driveBackward(autoSpd);
     blinkLeft();
+    autoState = BACKING;
+    backStart = millis();
+    backDur = 800;
+  }
+  // Cạnh phải quá gần → lùi nghiêng phải tránh tường
+  else if (r <= FIRST_WARNING)
+  {
+    autoSteer(STEER_R_MEDIUM);
+    driveBackward(autoSpd);
+    blinkRight();
     autoState = BACKING;
     backStart = millis();
     backDur = 800;
@@ -277,15 +347,13 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 // ===== SETUP =====
 void setup() 
 {
-  Serial.begin(115200);
+  /* Serial removed for performance */
 
   pinMode(LED_PIN,       OUTPUT);
   pinMode(RPWM_PIN,      OUTPUT);
   pinMode(LPWM_PIN,      OUTPUT);
   pinMode(LEFT_BLINKER,  OUTPUT);
   pinMode(RIGHT_BLINKER, OUTPUT);
-  analogWrite(RPWM_PIN, 0);
-  analogWrite(LPWM_PIN, 0);
 
   for (int i = 0; i < NUM_SENSORS; i++) 
   {
@@ -297,6 +365,15 @@ void setup()
   steeringServo.attach(SERVO_PIN);
   steeringServo.write(90);
 
+  /* LEDC PWM setup for motor outputs */
+  ledcSetup(RPWM_CHANNEL, PWM_FREQ_HZ, PWM_RESOLUTION);
+  ledcSetup(LPWM_CHANNEL, PWM_FREQ_HZ, PWM_RESOLUTION);
+  ledcAttachPin(RPWM_PIN, RPWM_CHANNEL);
+  ledcAttachPin(LPWM_PIN, LPWM_CHANNEL);
+  /* ensure outputs start at 0 */
+  ledcWrite(RPWM_CHANNEL, 0);
+  ledcWrite(LPWM_CHANNEL, 0);
+
   WiFi.mode(WIFI_STA);
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
@@ -304,7 +381,7 @@ void setup()
   esp_now_init();
   esp_now_register_recv_cb(OnDataRecv);
 
-  Serial.println("RX TorX Ready");
+  /* Serial debug removed */
 }
 
 // ===== LOOP =====
@@ -333,29 +410,41 @@ void loop()
     if (esp_now_add_peer(&peer) == ESP_OK) txPeerAdded = true;
   }
 
+  // ===== BATTERY READ & AVERAGE =====
+  uint16_t rawAdc = analogRead(BAT_PIN);
+  // update circular buffer
+  energySum -= energyBuf[energyIndex];
+  energyBuf[energyIndex] = rawAdc;
+  energySum += rawAdc;
+  energyIndex++;
+  if (energyIndex >= ENERGY_FILTER_SIZE) energyIndex = 0;
+  energyAvgADC = energySum / ENERGY_FILTER_SIZE;
+  // convert to voltage
+  float vout = ((float)energyAvgADC / 4095.0f) * ADC_REF_VOLTAGE;
+  float vin = vout * ((R_DIV_TOP + R_DIV_BOTTOM) / R_DIV_BOTTOM);
+  // apply calibration factor to correct for ADC/reference/divider error
+  energy100 = (uint16_t)roundf(vin * CALIB_FACTOR * 100.0f);
+
+  /* detect mode change and sync state: on any mode transition reset motor outputs safely */
+  if (prevMode != -1 && rxData.mode != prevMode) {
+    currentPWM = 0;
+    targetPWM = 0;
+    stopMotor();
+  }
+  prevMode = rxData.mode;
+
   /* ===== AUTO MODE ===== */
   if (rxData.mode == 0)
   {
-    autoSpd = (uint8_t)map(rxData.trimAutoGas, 0, 4095, 10, 20);
+     autoSpd = rxData.trimAutoGas;
     readUltrasonics();
 
-    Serial.print("S1:"); Serial.print(distances[0]);
-    Serial.print("cm  S2:"); Serial.print(distances[1]);
-    Serial.print("cm  S3:"); Serial.print(distances[2]);
-    Serial.print("cm  S4:"); Serial.print(distances[3]);
-    Serial.print("cm  S5:"); Serial.print(distances[4]);
-    Serial.println("cm");
+    /* Debug prints removed for performance */
 
     autoNavigate();
 
-    // Gửi khoảng cách + trạng thái tiến/lùi ngược lên TX (tay cầm)
-    if (txPeerAdded) {
-      SensorData sData;
-      for (int i = 0; i < 5; i++) sData.dist[i] = (uint16_t)distances[i];
-      sData.driveState = autoDriveDir;
-      sData.steerState = autoSteerDir;
-      esp_now_send(txMacAddr, (uint8_t *)&sData, sizeof(sData));
-    }
+    // prepare and send sensor + energy periodically (include sensors in AUTO)
+    sendSensorDataIfDue(true);
 
     digitalWrite(LED_PIN, HIGH);
     return;
@@ -372,7 +461,8 @@ void loop()
   {
     targetPWM = 0;
   } else {
-    forward    = (err > 0);
+    /* apply optional inversion for wiring differences */
+    forward = ((err > 0) != (THROTTLE_INVERT != 0));
     int range  = forward ? THROTTLE_RANGE_FWD : THROTTLE_RANGE_REV;
     int pwmMax = forward ? maxFwd : PWM_MAX_REV;
     float norm = constrain((float)(abs(err) - DEADZONE) / (float)(range - DEADZONE), 0.0f, 1.0f);
@@ -384,11 +474,11 @@ void loop()
 
   if (currentPWM == 0) 
   {
-    analogWrite(RPWM_PIN, 0); analogWrite(LPWM_PIN, 0);
+    ledcWrite(RPWM_CHANNEL, 0); ledcWrite(LPWM_CHANNEL, 0);
   } else if (forward) {
-    analogWrite(RPWM_PIN, 0); analogWrite(LPWM_PIN, currentPWM);
+    ledcWrite(RPWM_CHANNEL, 0); ledcWrite(LPWM_CHANNEL, currentPWM);
   } else {
-    analogWrite(RPWM_PIN, currentPWM); analogWrite(LPWM_PIN, 0);
+    ledcWrite(RPWM_CHANNEL, currentPWM); ledcWrite(LPWM_CHANNEL, 0);
   }
 
   // Servo lái
@@ -437,8 +527,7 @@ void loop()
     digitalWrite(LED_PIN, ledState); 
   }
 
-  Serial.print("MANUAL | T:"); Serial.print(rxData.throttle);
-  Serial.print(" PWM:"); Serial.print(currentPWM);
-  Serial.print(" Dir:"); Serial.print(forward ? "FWD" : "REV");
-  Serial.print(" Servo:"); Serial.println(servoAngle);
+  /* Runtime debug prints removed for performance */
+  // send energy periodically in MANUAL (no sensors)
+  sendSensorDataIfDue(false);
 }

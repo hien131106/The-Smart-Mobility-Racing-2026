@@ -18,7 +18,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define STEER_PIN       32
 #define TRIM_GAS_PIN      39   // Biến trở giới hạn tốc độ tối đa (manual)
 #define TRIM_STEER_PIN    34   // Biến trở giữ góc lái khi thả joystick
-#define TRIM_AUTO_GAS_PIN 35   // Biến trở tốc độ tự hành (15-20)
+#define TRIM_AUTO_GAS_PIN 35   // Biến trở tốc độ tự hành (10-30)
 #define MODE_PIN        26
 #define LED_STATUS      2
 #define LED_AUTO        16
@@ -33,13 +33,15 @@ typedef struct {
   uint8_t  mode;       // 1 = MANUAL (HIGH), 0 = AUTO (LOW)
   uint16_t trimGas;     // 0-4095 → giới hạn tốc độ tối đa (manual)
   uint16_t trimSteer;   // 0-4095 → góc lái giữ khi thả joystick
-  uint16_t trimAutoGas; // 0-4095 → tốc độ tự hành (15-20)
+  uint16_t trimAutoGas; // 0-4095 → tốc độ tự hành (mapped to 10-30 before sending)
 } ControlData;
+// Note: We'll send `trimAutoGas` as a logical autospeed value in range 10-30.
 
 typedef struct {
   uint16_t dist[5];    // S1..S5 (cm), 999 = không phát hiện
   uint8_t  driveState; // 0=STOP, 1=FORWARD, 2=BACKWARD
   uint8_t  steerState; // 0=CENTER, 1=LEFT, 2=RIGHT
+  uint16_t energy100;  // battery voltage in hundredths of volts (e.g., 1265 -> 12.65V)
 } SensorData;
 
 ControlData txData;
@@ -89,8 +91,7 @@ uint16_t movingAverage(uint16_t *buffer, uint32_t &sum, uint16_t newVal)
 
 void setup() 
 {
-  Serial.begin(115200);
-
+  /* Serial removed for performance */
   pinMode(LED_STATUS, OUTPUT);
   pinMode(LED_AUTO, OUTPUT);
   pinMode(LED_MANUAL, OUTPUT);
@@ -117,7 +118,6 @@ void setup()
   peerInfo.channel = 11;
   peerInfo.encrypt = false;
   esp_now_add_peer(&peerInfo);
-  Serial.println("END SETUP");
 }
 
 void loop() 
@@ -134,6 +134,8 @@ void loop()
   txData.trimGas    = movingAverage(trimGasBuf,      trimGasSum,     rawTrimGas);
   txData.trimSteer  = movingAverage(trimSteerBuf,    trimSteerSum,   rawTrimSteer);
   txData.trimAutoGas = movingAverage(trimAutoGasBuf, trimAutoGasSum, rawTrimAutoGas);
+  // map raw ADC -> logical autospeed (10..30) so RX receives exact same value
+  txData.trimAutoGas = map(txData.trimAutoGas, 0, 4095, 10, 60);
 
   filterIndex++;
   if (filterIndex >= FILTER_SIZE) filterIndex = 0;
@@ -171,37 +173,64 @@ void loop()
       display.print(sendOK ? "OK" : "FAIL");
       display.setTextColor(SSD1306_WHITE);
 
-      // Nội dung vùng xanh: 5 khoảng cách siêu âm
-      if (sensorDataReceived) {
-        // Dòng 1: Middle (S3) căn giữa màn hình
-        String mStr = "M:" + String(rxSensor.dist[2]);
-        display.setCursor((128 - (int)mStr.length() * 6) / 2, 18);
-        display.print(mStr);
+      // Nội dung vùng xanh: 5 khoảng cách siêu âm (chỉ hiển thị nếu RX gửi dữ liệu cảm biến)
+      bool sensorsValid = false;
+      for (int i = 0; i < 5; i++) if (rxSensor.dist[i] != 999) sensorsValid = true;
+      if (sensorDataReceived && sensorsValid) {
+        /* Dòng 1: Middle (S3) centered */
+        char mStrBuf[12];
+        (void)snprintf(mStrBuf, sizeof(mStrBuf), "M:%u", (unsigned int)rxSensor.dist[2]);
+        display.setCursor((128 - (int)strlen(mStrBuf) * 6) / 2, 18);
+        display.print(mStrBuf);
         // Dòng 2: L  FL  FR  R theo thứ tự
         display.setCursor(0, 28);
         display.print("L:");   display.print(rxSensor.dist[0]);
         display.print(" FL:"); display.print(rxSensor.dist[1]);
         display.print(" FR:"); display.print(rxSensor.dist[3]);
         display.print(" R:");  display.print(rxSensor.dist[4]);
+
+        // Dòng 3: tốc độ tự hành
+        display.setCursor(0, 38);
+        display.print("AutoSpd: ");
+        // txData.trimAutoGas already contains logical autospeed (10-30)
+        display.println((int)txData.trimAutoGas);
+
+        // Dòng 4: trạng thái tiến/lùi (trái) + lái (phải)
+        char driveBuf[8];
+        char steerBuf[12];
+        if (rxSensor.driveState == 1) {
+          (void)strcpy(driveBuf, "FWD");
+        } else if (rxSensor.driveState == 2) {
+          (void)strcpy(driveBuf, "BWD");
+        } else {
+          (void)strcpy(driveBuf, "STP");
+        }
+        if (rxSensor.steerState == 1) {
+          (void)strcpy(steerBuf, "< LEFT");
+        } else if (rxSensor.steerState == 2) {
+          (void)strcpy(steerBuf, "RIGHT >");
+        } else {
+          (void)strcpy(steerBuf, "CENTER");
+        }
+        display.setCursor(0, 48);
+        display.print(driveBuf);
+        display.setCursor(128 - (int)strlen(steerBuf) * 6, 48);
+        display.print(steerBuf);
       } else {
         display.setCursor(0, 18);
         display.print("Waiting sensors...");
+        // show AutoSpd even if no sensors
+        display.setCursor(0, 38);
+        display.print("AutoSpd: ");
+        display.println((int)txData.trimAutoGas);
       }
-      // Dòng 3: tốc độ tự hành
-      display.setCursor(0, 38);
-      display.print("AutoSpd: ");
-      display.println((int)map(txData.trimAutoGas, 0, 4095, 10, 20));
-
-      // Dòng 4: trạng thái tiến/lùi (trái) + lái (phải)
+      // Energy display (bottom line) — always shown (if no packet yet, show placeholder)
+      display.setCursor(0, 56);
       if (sensorDataReceived) {
-        String driveStr = (rxSensor.driveState == 1) ? "FWD" :
-                          (rxSensor.driveState == 2) ? "BWD" : "STP";
-        String steerStr = (rxSensor.steerState == 1) ? "< LEFT" :
-                          (rxSensor.steerState == 2) ? "RIGHT >" : "CENTER";
-        display.setCursor(0, 48);
-        display.print(driveStr);
-        display.setCursor(128 - (int)steerStr.length() * 6, 48);
-        display.print(steerStr);
+        float ev = ((float)rxSensor.energy100) / 100.0f;
+        display.print("Energy: "); display.print(ev, 2); display.print(" V");
+      } else {
+        display.print("Energy: --.- V");
       }
     }
     else
@@ -229,6 +258,14 @@ void loop()
 
       display.print("TrimSteer: ");
       display.println(map(txData.trimSteer, 0, 4095, 65, 125));
+      // Energy display (bottom line)
+      display.setCursor(0, 56);
+      if (sensorDataReceived) {
+        float ev = ((float)rxSensor.energy100) / 100.0f;
+        display.print("Energy: "); display.print(ev, 2); display.print(" V");
+      } else {
+        display.print("Energy: --.- V");
+      }
     }
 
     display.display();
