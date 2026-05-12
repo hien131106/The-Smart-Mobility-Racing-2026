@@ -225,107 +225,137 @@ void notBlink() {
 //   r  = S5 = distances[4]   (side-right)
 void autoNavigate()
 {
-  int fl = distances[1];
-  int fm = distances[2];
-  int fr = distances[3];
-  int l  = distances[0];
-  int r  = distances[4];
+  // Correct sensor mapping: side-left (outer) = distances[0], front-left = distances[1],
+  // front-middle = distances[2], front-right = distances[3], side-right (outer) = distances[4]
+  int l_out = distances[1];
+  int l_mid = distances[2];
+  int center = distances[3];
+  int r_mid = distances[0];
+  int r_out = distances[4];
 
-  // --- Đang trong trạng thái lùi: giữ đến hết thời gian ---
+  // Helper lambdas
+  auto isFirst = [](int d){ return d <= FIRST_WARNING; };
+  auto isSecond = [](int d){ return d > FIRST_WARNING && d <= SECOND_WARNING; };
+
+  // If currently backing, keep backing until duration expires (non-blocking)
   if (autoState == BACKING)
   {
-    if (millis() - backStart < backDur) return;
+    if (millis() - backStart < backDur) return; // still backing
     stopMotor();
     autoState = NAVIGATE;
   }
 
-  // --- Quyết định hướng đi (thuật toán gốc) ---
+  // 1) PRIORITY: any sensor in FIRST => must BACK (non-blocking: set BACKING state)
+  if (isFirst(l_out) || isFirst(l_mid) || isFirst(center) || isFirst(r_mid) || isFirst(r_out))
+  {
+    int leftMin  = min(l_out, l_mid);
+    int rightMin = min(r_out, r_mid);
 
-  // Giữa quá gần → lùi thẳng
-  if (fm <= FIRST_WARNING)
-  {
-    autoSteer(STEER_C);
-    driveBackward(autoSpd);
-    notBlink();
-    autoState = BACKING;
-    backStart = millis();
-    backDur = 1000;
+    // center critical -> back straight unless sides are also critical
+    if (isFirst(center) && !isFirst(l_out) && !isFirst(l_mid) && !isFirst(r_out) && !isFirst(r_mid))
+    {
+      autoSteer(STEER_C);
+      driveBackward(autoSpd);
+      notBlink();
+      autoState = BACKING;
+      backStart = millis();
+      backDur = 1000;
+      return;
+    }
+
+    // Both sides critical: pick side with larger clearance to steer toward that side while backing
+    if ((isFirst(l_out) || isFirst(l_mid)) && (isFirst(r_out) || isFirst(r_mid)))
+    {
+      if ((leftMin == rightMin) || abs(leftMin - rightMin) < 5) {
+        // roughly equal -> back straight
+        autoSteer(STEER_C);
+        driveBackward(autoSpd);
+        notBlink();
+        autoState = BACKING;
+        backStart = millis();
+        backDur = 1000;
+        return;
+      } else if (leftMin < rightMin) {
+        // left side is closer (smaller distance) -> steer LEFT while backing to create space on right
+        autoSteer(STEER_L_MEDIUM);
+        driveBackward(autoSpd);
+        blinkLeft();
+        autoState = BACKING;
+        backStart = millis();
+        backDur = 900;
+        return;
+      } else {
+        // right side is closer -> steer RIGHT while backing
+        autoSteer(STEER_R_MEDIUM);
+        driveBackward(autoSpd);
+        blinkRight();
+        autoState = BACKING;
+        backStart = millis();
+        backDur = 900;
+        return;
+      }
+    }
+
+    // Single-side critical or corner critical
+    if (isFirst(l_out) || isFirst(l_mid))
+    {
+      autoSteer(STEER_L_MEDIUM);
+      driveBackward(autoSpd);
+      blinkLeft();
+      autoState = BACKING;
+      backStart = millis();
+      backDur = 900;
+      return;
+    }
+    if (isFirst(r_out) || isFirst(r_mid))
+    {
+      autoSteer(STEER_R_MEDIUM);
+      driveBackward(autoSpd);
+      blinkRight();
+      autoState = BACKING;
+      backStart = millis();
+      backDur = 900;
+      return;
+    }
   }
-  // Góc trái rất gần → lùi nghiêng trái
-  else if (fl <= FIRST_WARNING)
+
+  // 2) SECOND-level handling (no FIRST present)
+  // Pair checks first (strong steering)
+  if (isSecond(l_mid) && isSecond(l_out))
   {
-    autoSteer(STEER_L_MEDIUM);
-    driveBackward(autoSpd);
-    blinkLeft();
-    autoState = BACKING;
-    backStart = millis();
-    backDur = 1000;
-  }
-  // Góc phải rất gần → lùi nghiêng phải
-  else if (fr <= FIRST_WARNING)
-  {
-    autoSteer(STEER_R_MEDIUM);
-    driveBackward(autoSpd);
-    blinkRight();
-    autoState = BACKING;
-    backStart = millis();
-    backDur = 1000;
-  }
-  // Trái + giữa gần → quẹo phải mạnh
-  else if (fl <= SECOND_WARNING && fm <= SECOND_WARNING)
-  {
-    autoSteer(STEER_R_HARD);
+    autoSteer(STEER_R_HARD); // turn right strongly to avoid left obstacle
     driveForward(autoSpd);
     blinkRight();
+    return;
   }
-  // Phải + giữa gần → quẹo trái mạnh
-  else if (fr <= SECOND_WARNING && fm <= SECOND_WARNING)
+  if (isSecond(r_mid) && isSecond(r_out))
   {
-    autoSteer(STEER_L_HARD);
+    autoSteer(STEER_L_HARD); // turn left strongly to avoid right obstacle
     driveForward(autoSpd);
     blinkLeft();
+    return;
   }
-  // Trái cảnh báo → nghiêng phải vừa
-  else if (fl > FIRST_WARNING && fl < THIRD_WARNING)
+
+  // Outer single-sensor warnings -> light steer while moving forward
+  if (isSecond(r_out))
   {
-    autoSteer(STEER_R_MEDIUM);
+    autoSteer(STEER_L_MEDIUM); // steer left lightly
+    driveForward(autoSpd);
+    blinkLeft();
+    return;
+  }
+  if (isSecond(l_out))
+  {
+    autoSteer(STEER_R_MEDIUM); // steer right lightly
     driveForward(autoSpd);
     blinkRight();
+    return;
   }
-  // Phải cảnh báo → nghiêng trái vừa
-  else if (fr > FIRST_WARNING && fr < THIRD_WARNING)
-  {
-    autoSteer(STEER_L_MEDIUM);
-    driveForward(autoSpd);
-    blinkLeft();
-  }
-  // Cạnh trái quá gần → lùi nghiêng trái tránh tường
-  else if (l <= FIRST_WARNING)
-  {
-    autoSteer(STEER_L_MEDIUM);
-    driveBackward(autoSpd);
-    blinkLeft();
-    autoState = BACKING;
-    backStart = millis();
-    backDur = 800;
-  }
-  // Cạnh phải quá gần → lùi nghiêng phải tránh tường
-  else if (r <= FIRST_WARNING)
-  {
-    autoSteer(STEER_R_MEDIUM);
-    driveBackward(autoSpd);
-    blinkRight();
-    autoState = BACKING;
-    backStart = millis();
-    backDur = 800;
-  }
-  // Đường thông → tiến thẳng
-  else
-  {
-    autoSteer(STEER_C);
-    driveForward(autoSpd);
-    notBlink();
-  }
+
+  // Default: path clear -> go straight
+  autoSteer(STEER_C);
+  driveForward(autoSpd);
+  notBlink();
 }
 
 // ===== CALLBACK =====
