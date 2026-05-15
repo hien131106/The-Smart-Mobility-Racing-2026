@@ -20,9 +20,8 @@ const int echoPins[NUM_SENSORS] = {33, 32, 35, 34, 39};
 int distances[NUM_SENSORS];
 
 // ===== NGƯỠNG KHOẢNG CÁCH AUTO (cm) =====
-#define FIRST_WARNING   10
-#define SECOND_WARNING  30
-#define THIRD_WARNING   35
+#define DIST_BACK   8   // < này: lùi
+#define DIST_STEER  32   // < này (và > DIST_BACK): tiến + bẻ lái
 
 // ===== TỐC ĐỘ AUTO (được điều chỉnh qua trim chân 35, range 10-30) =====
 uint8_t autoSpd = 13;
@@ -49,6 +48,9 @@ unsigned long backDur    = 0;   // thời gian lùi, set riêng mỗi maneuver
 // ===== BLINK AUTO =====
 unsigned long lastBlinkAuto = 0;
 bool ledStateAuto           = false;
+
+// ===== TRẠNG THÁI AUTO (hiển thị Serial) =====
+String autoStateStr = "DUNG";
 
 // ===== CẤU TRÚC GÓI ESP-NOW =====
 typedef struct {
@@ -217,145 +219,90 @@ void notBlink() {
 }
 
 // ===== AUTO NAVIGATE =====
-// Sensor mapping (S1..S5 trái→phải):
-//   fl = S2 = distances[1]   (front-left)
-//   fm = S3 = distances[2]   (front-middle)
-//   fr = S4 = distances[3]   (front-right)
-//   l  = S1 = distances[0]   (side-left)
-//   r  = S5 = distances[4]   (side-right)
+// Sensor layout (S1..S5):
+//   l_out = distances[0]  (S1)
+//   l_mid = distances[1]  (S2)
+//   center= distances[2]  (S3)
+//   r_mid = distances[3]  (S4)
+//   r_out = distances[4]  (S5)
 void autoNavigate()
 {
-  // Correct sensor mapping: side-left (outer) = distances[0], front-left = distances[1],
-  // front-middle = distances[2], front-right = distances[3], side-right (outer) = distances[4]
-  int l_out = distances[1];
-  int l_mid = distances[2];
-  int center = distances[3];
-  int r_mid = distances[0];
-  int r_out = distances[4];
+  int l_out  = distances[0];
+  int l_mid  = distances[1];
+  int center = distances[2];
+  int r_mid  = distances[3];
+  int r_out  = distances[4];
 
-  // Helper lambdas
-  auto isFirst = [](int d){ return d <= FIRST_WARNING; };
-  auto isSecond = [](int d){ return d > FIRST_WARNING && d <= SECOND_WARNING; };
+  // Luôn in khoảng cách + trạng thái hiện tại
+  Serial.print("[AUTO] S1(L_OUT):");  Serial.print(l_out);
+  Serial.print("  S2(L_MID):");       Serial.print(l_mid);
+  Serial.print("  S3(CTR):");         Serial.print(center);
+  Serial.print("  S4(R_MID):");       Serial.print(r_mid);
+  Serial.print("  S5(R_OUT):");       Serial.print(r_out);
+  Serial.print("  | TRANG THAI: ");   Serial.println(autoStateStr);
 
-  // If currently backing, keep backing until duration expires (non-blocking)
+  // Đang lùi → chờ hết thời gian rồi mới xét lại
   if (autoState == BACKING)
   {
-    if (millis() - backStart < backDur) return; // still backing
+    if (millis() - backStart < backDur) return;
     stopMotor();
     autoState = NAVIGATE;
   }
 
-  // 1) PRIORITY: any sensor in FIRST => must BACK (non-blocking: set BACKING state)
-  if (isFirst(l_out) || isFirst(l_mid) || isFirst(center) || isFirst(r_mid) || isFirst(r_out))
+  // Case 2: trái < DIST_BACK → lùi + bẻ trái 1s
+  if (l_out < DIST_BACK || l_mid < DIST_BACK)
   {
-    int leftMin  = min(l_out, l_mid);
-    int rightMin = min(r_out, r_mid);
-
-    // center critical -> back straight unless sides are also critical
-    if (isFirst(center) && !isFirst(l_out) && !isFirst(l_mid) && !isFirst(r_out) && !isFirst(r_mid))
-    {
-      autoSteer(STEER_C);
-      driveBackward(autoSpd);
-      notBlink();
-      autoState = BACKING;
-      backStart = millis();
-      backDur = 1000;
-      return;
-    }
-
-    // Both sides critical: pick side with larger clearance to steer toward that side while backing
-    if ((isFirst(l_out) || isFirst(l_mid)) && (isFirst(r_out) || isFirst(r_mid)))
-    {
-      if ((leftMin == rightMin) || abs(leftMin - rightMin) < 5) {
-        // roughly equal -> back straight
-        autoSteer(STEER_C);
-        driveBackward(autoSpd);
-        notBlink();
-        autoState = BACKING;
-        backStart = millis();
-        backDur = 1000;
-        return;
-      } else if (leftMin < rightMin) {
-        // left side is closer (smaller distance) -> steer LEFT while backing to create space on right
-        autoSteer(STEER_L_MEDIUM);
-        driveBackward(autoSpd);
-        blinkLeft();
-        autoState = BACKING;
-        backStart = millis();
-        backDur = 900;
-        return;
-      } else {
-        // right side is closer -> steer RIGHT while backing
-        autoSteer(STEER_R_MEDIUM);
-        driveBackward(autoSpd);
-        blinkRight();
-        autoState = BACKING;
-        backStart = millis();
-        backDur = 900;
-        return;
-      }
-    }
-
-    // Single-side critical or corner critical
-    if (isFirst(l_out) || isFirst(l_mid))
-    {
-      autoSteer(STEER_L_MEDIUM);
-      driveBackward(autoSpd);
-      blinkLeft();
-      autoState = BACKING;
-      backStart = millis();
-      backDur = 900;
-      return;
-    }
-    if (isFirst(r_out) || isFirst(r_mid))
-    {
-      autoSteer(STEER_R_MEDIUM);
-      driveBackward(autoSpd);
-      blinkRight();
-      autoState = BACKING;
-      backStart = millis();
-      backDur = 900;
-      return;
-    }
-  }
-
-  // 2) SECOND-level handling (no FIRST present)
-  // Pair checks first (strong steering)
-  if (isSecond(l_mid) && isSecond(l_out))
-  {
-    autoSteer(STEER_R_HARD); // turn right strongly to avoid left obstacle
-    driveForward(autoSpd);
-    blinkRight();
-    return;
-  }
-  if (isSecond(r_mid) && isSecond(r_out))
-  {
-    autoSteer(STEER_L_HARD); // turn left strongly to avoid right obstacle
-    driveForward(autoSpd);
-    blinkLeft();
+    autoSteer(STEER_L_MEDIUM);
+    driveBackward(autoSpd);
+    autoState = BACKING; backStart = millis(); backDur = 1000;
+    autoStateStr = "LUI + LAI TRAI";
     return;
   }
 
-  // Outer single-sensor warnings -> light steer while moving forward
-  if (isSecond(r_out))
+  // Case 3: phải < DIST_BACK → lùi + bẻ phải 1s
+  if (r_out < DIST_BACK || r_mid < DIST_BACK)
   {
-    autoSteer(STEER_L_MEDIUM); // steer left lightly
-    driveForward(autoSpd);
-    blinkLeft();
-    return;
-  }
-  if (isSecond(l_out))
-  {
-    autoSteer(STEER_R_MEDIUM); // steer right lightly
-    driveForward(autoSpd);
-    blinkRight();
+    autoSteer(STEER_R_MEDIUM);
+    driveBackward(autoSpd);
+    autoState = BACKING; backStart = millis(); backDur = 1000;
+    autoStateStr = "LUI + LAI PHAI";
     return;
   }
 
-  // Default: path clear -> go straight
+  // Case 1: giữa < DIST_BACK → lùi thẳng 1s
+  if (center < DIST_BACK)
+  {
+    autoSteer(STEER_C);
+    driveBackward(autoSpd);
+    autoState = BACKING; backStart = millis(); backDur = 1000;
+    autoStateStr = "LUI THANG";
+    return;
+  }
+
+  // Case 4: trái trong vùng cảnh báo → tiến + bẻ phải
+  if ((l_out > DIST_BACK && l_out < DIST_STEER) ||
+      (l_mid > DIST_BACK && l_mid < DIST_STEER))
+  {
+    autoSteer(STEER_R_MEDIUM);
+    driveForward(autoSpd);
+    autoStateStr = "TIEN + LAI PHAI";
+    return;
+  }
+
+  // Case 5: phải trong vùng cảnh báo → tiến + bẻ trái
+  if ((r_out > DIST_BACK && r_out < DIST_STEER) ||
+      (r_mid > DIST_BACK && r_mid < DIST_STEER))
+  {
+    autoSteer(STEER_L_MEDIUM);
+    driveForward(autoSpd);
+    autoStateStr = "TIEN + LAI TRAI";
+    return;
+  }
+
+  // Mặc định: đường thông → tiến thẳng
   autoSteer(STEER_C);
   driveForward(autoSpd);
-  notBlink();
+  autoStateStr = "TIEN THANG";
 }
 
 // ===== CALLBACK =====
@@ -377,7 +324,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 // ===== SETUP =====
 void setup() 
 {
-  /* Serial removed for performance */
+  Serial.begin(115200);
 
   pinMode(LED_PIN,       OUTPUT);
   pinMode(RPWM_PIN,      OUTPUT);
@@ -410,8 +357,6 @@ void setup()
   esp_wifi_set_promiscuous(false);
   esp_now_init();
   esp_now_register_recv_cb(OnDataRecv);
-
-  /* Serial debug removed */
 }
 
 // ===== LOOP =====

@@ -14,8 +14,8 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 /* ===== JOYSTICK & IO ===== */
-#define THROTTLE_PIN    33
-#define STEER_PIN       32
+#define THROTTLE_PIN    32
+#define STEER_PIN       33
 #define TRIM_GAS_PIN      39   // Biến trở giới hạn tốc độ tối đa (manual)
 #define TRIM_STEER_PIN    34   // Biến trở giữ góc lái khi thả joystick
 #define TRIM_AUTO_GAS_PIN 35   // Biến trở tốc độ tự hành (10-30)
@@ -174,9 +174,7 @@ void loop()
       display.setTextColor(SSD1306_WHITE);
 
       // Nội dung vùng xanh: 5 khoảng cách siêu âm (chỉ hiển thị nếu RX gửi dữ liệu cảm biến)
-      bool sensorsValid = false;
-      for (int i = 0; i < 5; i++) if (rxSensor.dist[i] != 999) sensorsValid = true;
-      if (sensorDataReceived && sensorsValid) {
+      if (sensorDataReceived) {
         /* Dòng 1: Middle (S3) centered */
         char mStrBuf[12];
         (void)snprintf(mStrBuf, sizeof(mStrBuf), "M:%u", (unsigned int)rxSensor.dist[2]);
