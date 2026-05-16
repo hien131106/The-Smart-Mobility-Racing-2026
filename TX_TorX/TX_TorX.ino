@@ -135,7 +135,7 @@ void loop()
   txData.trimSteer  = movingAverage(trimSteerBuf,    trimSteerSum,   rawTrimSteer);
   txData.trimAutoGas = movingAverage(trimAutoGasBuf, trimAutoGasSum, rawTrimAutoGas);
   // map raw ADC -> logical autospeed (10..30) so RX receives exact same value
-  txData.trimAutoGas = map(txData.trimAutoGas, 0, 4095, 10, 60);
+  txData.trimAutoGas = map(txData.trimAutoGas, 0, 4095, 0, 50);
 
   filterIndex++;
   if (filterIndex >= FILTER_SIZE) filterIndex = 0;
