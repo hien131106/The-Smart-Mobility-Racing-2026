@@ -234,12 +234,12 @@ void autoNavigate()
   int r_out  = distances[4];
 
   // Luôn in khoảng cách + trạng thái hiện tại
-  Serial.print("[AUTO] S1(L_OUT):");  Serial.print(l_out);
-  Serial.print("  S2(L_MID):");       Serial.print(l_mid);
-  Serial.print("  S3(CTR):");         Serial.print(center);
-  Serial.print("  S4(R_MID):");       Serial.print(r_mid);
-  Serial.print("  S5(R_OUT):");       Serial.print(r_out);
-  Serial.print("  | TRANG THAI: ");   Serial.println(autoStateStr);
+  // Serial.print("[AUTO] S1(L_OUT):");  Serial.print(l_out);
+  // Serial.print("  S2(L_MID):");       Serial.print(l_mid);
+  // Serial.print("  S3(CTR):");         Serial.print(center);
+  // Serial.print("  S4(R_MID):");       Serial.print(r_mid);
+  // Serial.print("  S5(R_OUT):");       Serial.print(r_out);
+  // Serial.print("  | TRANG THAI: ");   Serial.println(autoStateStr);
 
   // Đang lùi → chờ hết thời gian rồi mới xét lại
   if (autoState == BACKING)
