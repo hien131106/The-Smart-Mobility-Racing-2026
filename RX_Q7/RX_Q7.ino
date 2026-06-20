@@ -15,6 +15,8 @@
 #define PWM_RESOLUTION  8
 #define RPWM_CHANNEL    4
 #define LPWM_CHANNEL    5
+#define LEFT_BLINKER    16
+#define RIGHT_BLINKER   17
 
 // ===== CẢM BIẾN SIÊU ÂM (5 CON - trái sang phải) =====
 // S1=trái ngoài, S2=trái trong, S3=giữa, S4=phải trong, S5=phải ngoài
@@ -24,9 +26,9 @@ const int echoPins[NUM_SENSORS] = {33, 32, 35, 34, 39};
 int distances[NUM_SENSORS];
 
 // ===== NGƯỠNG KHOẢNG CÁCH AUTO (cm) =====
-#define DIST_BACK   8   // < này: lùi
-#define DIST_STEER  32  // < này (và > DIST_BACK): tiến + bẻ lái
-#define DIST_STEER_2 20
+#define DIST_BACK   5   // < này: lùi
+#define DIST_STEER  29  // < này (và > DIST_BACK): tiến + bẻ lái
+#define DIST_STEER_2 18
 
 // ===== TỐC ĐỘ AUTO (điều chỉnh qua trim TX) =====
 uint8_t autoSpd = 13;
@@ -34,7 +36,7 @@ uint8_t autoSpd = 13;
 // ===== GÓC SERVO AUTO (constrain 65-125) =====
 #define STEER_C         90
 #define STEER_L_MEDIUM  65
-#define STEER_R_MEDIUM 115
+#define STEER_R_MEDIUM 125
 
 // ===== STATE MACHINE LÙI =====
 enum AutoState { NAVIGATE, BACKING };
@@ -81,10 +83,13 @@ Servo steeringServo;
 #define EXPO_GAIN           1.8
 #define RAMP_UP             1
 #define RAMP_DOWN           2
+#define BLINK_INTERVAL      100
 
 int currentPWM = 0, targetPWM = 0;
 bool forward = true;
 int8_t prevMode = -1; // track previous mode to reset state on mode switch
+unsigned long prevBlink = 0;
+bool blinkStateManual   = false;
 
 // ===== CALLBACK =====
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
@@ -228,6 +233,8 @@ void setup()
   pinMode(RPWM_PIN, OUTPUT);
   pinMode(LPWM_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LEFT_BLINKER, OUTPUT);
+  pinMode(RIGHT_BLINKER, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
   for (int i = 0; i < NUM_SENSORS; i++)
@@ -339,6 +346,28 @@ void loop()
     servoAngle = constrain(map(rxData.steer, STEER_MIN_ADC, STEER_MAX_ADC, 125, 65), 65, 125);
   }
   steeringServo.write(servoAngle);
+
+  // Xi nhan
+  if (servoAngle < 75 || servoAngle > 115) 
+  {
+    if (now - prevBlink >= BLINK_INTERVAL) 
+    {
+      prevBlink = now; 
+      blinkStateManual = !blinkStateManual; 
+    }
+    if (servoAngle < 75) 
+    {
+      digitalWrite(LEFT_BLINKER, blinkStateManual); 
+      digitalWrite(RIGHT_BLINKER, LOW);
+    } else {
+      digitalWrite(RIGHT_BLINKER, blinkStateManual); 
+      digitalWrite(LEFT_BLINKER, LOW);
+    }
+  } else {
+    digitalWrite(LEFT_BLINKER, LOW); 
+    digitalWrite(RIGHT_BLINKER, LOW);
+    blinkStateManual = false;
+  }
 
   // simple status LED when link present
   digitalWrite(LED_PIN, HIGH);
